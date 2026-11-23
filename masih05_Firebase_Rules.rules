@@ -1,0 +1,48 @@
+// masih05_Firebase_Rules.rules
+// Paste into Firebase console -> Firestore Database -> Rules -> Publish.
+// Nobody can read or write anything until the admin approves their account.
+// The first account created becomes the admin (needs no paid plan or server code).
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function profilePath() { return /databases/$(database)/documents/profiles/$(request.auth.uid); }
+    function adminPath() { return /databases/$(database)/documents/config/admin; }
+    function approved() {
+      return signedIn() && exists(profilePath()) && get(profilePath()).data.approved == true;
+    }
+    function isAdmin() { return approved() && get(profilePath()).data.role == 'admin'; }
+
+    // marker document: created once, by the very first account
+    match /config/admin {
+      allow read: if signedIn();
+      allow create: if signedIn() && !exists(adminPath())
+                    && request.resource.data.uid == request.auth.uid;
+    }
+
+    match /profiles/{uid} {
+      allow read: if signedIn() && (uid == request.auth.uid || isAdmin());
+      allow create: if signedIn() && uid == request.auth.uid && (
+        (request.resource.data.role == 'trainer' && request.resource.data.approved == false)
+        || (request.resource.data.role == 'admin' && request.resource.data.approved == true
+            && !exists(adminPath())
+            && getAfter(adminPath()).data.uid == request.auth.uid));
+      allow update: if isAdmin() && uid != request.auth.uid;
+      allow delete: if false;
+    }
+
+    match /curricula/{id} {
+      allow read, create, update: if approved();
+      allow delete: if isAdmin();
+    }
+    match /students/{id} {
+      allow read, create, update: if approved();
+      allow delete: if isAdmin();
+    }
+    match /records/{id} {
+      allow read, create: if approved();
+      allow delete: if isAdmin();
+    }
+  }
+}

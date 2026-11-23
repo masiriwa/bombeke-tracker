@@ -1,0 +1,6 @@
+apiKey: "AIzaSyCyNbWk7at4ugdKqMlqVIFGaLPkA7zt29w",
+  authDomain: "bombeke-student-tracker.firebaseapp.com",
+  projectId: "bombeke-student-tracker",
+  storageBucket: "bombeke-student-tracker.firebasestorage.app",
+  messagingSenderId: "269336849368",
+  appId: "1:269336849368:web:27d0aca51a5504cbffe0ad"
