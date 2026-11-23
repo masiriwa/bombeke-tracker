@@ -1,48 +1,49 @@
-// masih05_Firebase_Rules.rules
-// Paste into Firebase console -> Firestore Database -> Rules -> Publish.
-// Nobody can read or write anything until the admin approves their account.
-// The first account created becomes the admin (needs no paid plan or server code).
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
     function signedIn() { return request.auth != null; }
-    function profilePath() { return /databases/$(database)/documents/profiles/$(request.auth.uid); }
-    function adminPath() { return /databases/$(database)/documents/config/admin; }
-    function approved() {
-      return signedIn() && exists(profilePath()) && get(profilePath()).data.approved == true;
+    function isAdmin() {
+      return signedIn() && exists(/databases/$(database)/documents/config/admin)
+        && get(/databases/$(database)/documents/config/admin).data.uid == request.auth.uid;
     }
-    function isAdmin() { return approved() && get(profilePath()).data.role == 'admin'; }
+    function approved(org) {
+      return isAdmin() || (signedIn()
+        && exists(/databases/$(database)/documents/profiles/$(request.auth.uid))
+        && org in get(/databases/$(database)/documents/profiles/$(request.auth.uid)).data.orgs);
+    }
 
-    // marker document: created once, by the very first account
+    // marks who the first (admin) user is
     match /config/admin {
       allow read: if signedIn();
-      allow create: if signedIn() && !exists(adminPath())
-                    && request.resource.data.uid == request.auth.uid;
+      allow create: if signedIn() && request.resource.data.uid == request.auth.uid
+        && !exists(/databases/$(database)/documents/config/admin);
     }
 
     match /profiles/{uid} {
-      allow read: if signedIn() && (uid == request.auth.uid || isAdmin());
-      allow create: if signedIn() && uid == request.auth.uid && (
-        (request.resource.data.role == 'trainer' && request.resource.data.approved == false)
-        || (request.resource.data.role == 'admin' && request.resource.data.approved == true
-            && !exists(adminPath())
-            && getAfter(adminPath()).data.uid == request.auth.uid));
-      allow update: if isAdmin() && uid != request.auth.uid;
-      allow delete: if false;
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      // first user becomes admin; everyone else is a trainer with no approvals yet
+      allow create: if signedIn() && request.auth.uid == uid && (
+        (request.resource.data.role == 'admin'
+          && !exists(/databases/$(database)/documents/config/admin))
+        || (request.resource.data.role == 'trainer' && request.resource.data.orgs.size() == 0));
+      // users may only request access; admins can change anything
+      allow update: if isAdmin()
+        || (request.auth.uid == uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['want']));
     }
 
-    match /curricula/{id} {
-      allow read, create, update: if approved();
-      allow delete: if isAdmin();
-    }
     match /students/{id} {
-      allow read, create, update: if approved();
-      allow delete: if isAdmin();
+      allow read, update, delete: if approved(resource.data.org);
+      allow create: if approved(request.resource.data.org);
+    }
+    match /curricula/{id} {
+      allow read, update, delete: if approved(resource.data.org);
+      allow create: if approved(request.resource.data.org);
     }
     match /records/{id} {
-      allow read, create: if approved();
-      allow delete: if isAdmin();
+      allow read, update, delete: if approved(resource.data.org);
+      allow create: if approved(request.resource.data.org);
     }
   }
 }
