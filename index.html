@@ -42,7 +42,7 @@ const rows=async q=>(await q.get()).docs.map(d=>({id:d.id,...d.data()}));
 async function loadAll(){
   const[c,s]=await Promise.all([rows(fs.collection('curricula').where('org','==',ORG)),rows(fs.collection('students').where('org','==',ORG))]);
   db.curricula=c.map(x=>({id:x.id,name:x.name,modules:x.modules||[]})).sort((a,b)=>a.name.localeCompare(b.name));
-  db.students=s.map(x=>({id:x.id,name:x.name,cid:x.cid,photo:x.photo,doneIds:x.doneIds||[]})).sort((a,b)=>a.name.localeCompare(b.name));
+  db.students=s.map(x=>({id:x.id,name:x.name,cid:x.cid,cids:x.cids||(x.cid?[x.cid]:[]),photo:x.photo,doneIds:x.doneIds||[]})).sort((a,b)=>a.name.localeCompare(b.name));
   db.team=me.role==='admin'?await rows(fs.collection('profiles')):[];}
 async function mkProfile(u,name){const first=!(await fs.doc('config/admin').get()).exists,b=fs.batch();
   if(first)b.set(fs.doc('config/admin'),{uid:u.uid});
@@ -52,8 +52,8 @@ async function boot(u){me=null;SID=null;CID=null;T=0;
     me={id:u.uid,...p.data()};me.orgs=me.orgs||[];me.want=me.want||[];me.ok=me.role==='admin'||me.orgs.includes(ORG);
     if(!me.ok&&!me.want.includes(ORG)){await fs.doc('profiles/'+u.uid).update({want:firebase.firestore.FieldValue.arrayUnion(ORG)});me.want.push(ORG)}
     if(me.ok)await loadAll()}}catch(e){alert(e.message)}render()}
-async function openStu(id){SID=id;render();const s=db.students.find(x=>x.id===id);
-  if(!s.records){try{s.records=(await rows(fs.collection('records').where('studentId','==',id).where('org','==',ORG))).map(x=>({date:x.date,trainer:x.trainer,lid:x.lid,rating:x.rating,done:x.done,skills:x.skills,struggles:x.struggles,notes:x.notes}))}catch(e){alert(e.message);s.records=[]}}
+async function openStu(id){SID=id;EID=null;render();const s=db.students.find(x=>x.id===id);
+  if(!s.records){try{s.records=(await rows(fs.collection('records').where('studentId','==',id).where('org','==',ORG))).map(x=>({id:x.id,createdBy:x.createdBy,editedBy:x.editedBy,date:x.date,trainer:x.trainer,lid:x.lid,rating:x.rating,done:x.done,skills:x.skills,struggles:x.struggles,notes:x.notes}))}catch(e){alert(e.message);s.records=[]}}
   if(SID===id)render()}
 let T=0,SID=null,CID=null;
 const av=(s,c='')=>s.photo?`<img class="av ${c}" src="${s.photo}">`:`<div class="av ${c}">${esc((s.name||'?')[0].toUpperCase())}</div>`;
@@ -62,12 +62,14 @@ function shrink(f,cb){const r=new FileReader();r.onload=()=>{const i=new Image()
 function setPhoto(id,f){if(!f)return;shrink(f,async d=>{try{await fs.doc('students/'+id).update({photo:d});db.students.find(x=>x.id===id).photo=d;render()}catch(e){alert(e.message)}})}
 const cur=id=>db.curricula.find(c=>c.id===id);
 const lessons=c=>c?c.modules.flatMap(m=>m.lessons.map(l=>({...l,mod:m.title}))):[];
+const cids=s=>s.cids&&s.cids.length?s.cids:(s.cid?[s.cid]:[]);
 function stats(s){
-  const L=lessons(cur(s.cid)),done=new Set(s.doneIds||[]);
-  const next=L.find(l=>!done.has(l.id));
+  const done=new Set(s.doneIds||[]);
+  const byC=cids(s).map(id=>cur(id)).filter(Boolean).map(c=>{const L=lessons(c);const n=L.filter(l=>done.has(l.id)).length;return{c,L,n,pct:L.length?Math.round(n/L.length*100):0,next:L.find(l=>!done.has(l.id))}});
+  const L=byC.flatMap(b=>b.L),n=byC.reduce((a,b)=>a+b.n,0),next=(byC.find(b=>b.next)||{}).next;
   const rs=[...(s.records||[])].sort((a,b)=>a.date<b.date?1:-1);
   const weak=[...new Set(rs.filter(r=>r.struggles||r.rating<=2).slice(0,5).map(r=>r.struggles||('Low rating in '+(L.find(l=>l.id===r.lid)||{}).title)))];
-  return{L,done,next,rs,weak,pct:L.length?Math.round(done.size/L.length*100):0};
+  return{L,done,next,rs,weak,byC,n,pct:L.length?Math.round(n/L.length*100):0};
 }
 function tab(n){T=n;SID=null;CID=null;render()}
 function render(){
@@ -84,36 +86,60 @@ function students(q=''){
   <div id="sl">${sl(q)}</div>`;
 }
 function sl(q){return db.students.filter(s=>s.name.toLowerCase().includes(q.toLowerCase())).map(s=>{const x=stats(s);
-  return `<div class="card st" onclick="openStu('${s.id}')"><div style="display:flex;gap:12px;align-items:center">${av(s)}<div><b>${esc(s.name)}</b><div class="mu">${esc((cur(s.cid)||{}).name||'')} · next: ${x.next?esc(x.next.title):'all done'}</div></div></div><b>${x.pct}%</b></div>`}).join('')||'<p class="mu">No students yet.</p>'}
-async function addStu(){const n=$('sn').value.trim();if(!n||!$('sc').value)return;const f=$('sp').files[0],go=async p=>{try{const d={name:n,cid:$('sc').value,photo:p||null,doneIds:[],org:ORG},r=await fs.collection('students').add({...d,createdAt:TS()});
+  return `<div class="card st" onclick="openStu('${s.id}')"><div style="display:flex;gap:12px;align-items:center">${av(s)}<div><b>${esc(s.name)}</b><div class="mu">${esc(x.byC.map(b=>b.c.name).join(', '))} · next: ${x.next?esc(x.next.title):'all done'}</div></div></div><b>${x.pct}%</b></div>`}).join('')||'<p class="mu">No students yet.</p>'}
+async function addStu(){const n=$('sn').value.trim();if(!n||!$('sc').value)return;const f=$('sp').files[0],go=async p=>{try{const d={name:n,cid:$('sc').value,cids:[$('sc').value],photo:p||null,doneIds:[],org:ORG},r=await fs.collection('students').add({...d,createdAt:TS()});
   db.students.push({id:r.id,...d,records:[]});db.students.sort((a,b)=>a.name.localeCompare(b.name));render()}catch(e){alert(e.message)}};
   if(f)shrink(f,go);else go()}
+const RATE=[[5,'Excellent'],[4,'Good'],[3,'Fair'],[2,'Weak'],[1,'Needs redo']];
+const rateOpts=sel=>RATE.map(([n,t])=>`<option value="${n}" ${n==sel?'selected':''}>${n} ${t}</option>`).join('');
+const lessonOpts=(x,sel)=>x.byC.map(b=>`<optgroup label="${esc(b.c.name)}">${b.L.map(l=>`<option value="${l.id}" ${sel===l.id?'selected':''}>${esc(l.mod)} → ${esc(l.title)}${x.done.has(l.id)?' ✓':''}</option>`).join('')}</optgroup>`).join('');
+const canDel=r=>me.role==='admin'||r.createdBy===me.id;
+let EID=null;
+function editForm(s,x,r){return `<div class="card" style="border-color:var(--gd)"><b>Edit session</b> <span class="mu">(taught by ${esc(r.trainer)})</span>
+  <div class="row"><input type="date" id="ed" value="${esc(r.date)}"></div>
+  <div class="row"><select id="el">${lessonOpts(x,r.lid)}</select><select id="er">${rateOpts(r.rating)}</select></div>
+  <label><input type="checkbox" id="ex" ${r.done?'checked':''} style="width:auto"> Lesson completed / mastered</label>
+  <div class="row"><input id="ek" placeholder="Skills gained" value="${esc(r.skills)}"><input id="es" placeholder="Struggles" value="${esc(r.struggles)}"></div>
+  <textarea id="eo" style="min-height:60px" placeholder="Notes for the next trainer">${esc(r.notes)}</textarea>
+  <div class="row"><button class="p" onclick="saveRec('${s.id}','${r.id}')">Save changes</button><button onclick="EID=null;render()">Cancel</button></div></div>`}
 function profile(){
-  const s=db.students.find(x=>x.id===SID);if(!s.records)return '<button onclick="SID=null;render()">← All students</button><p class="mu">Loading records…</p>';const x=stats(s),today=new Date().toISOString().slice(0,10);
-  const last=x.rs[0];
+  const s=db.students.find(x=>x.id===SID);if(!s.records)return '<button onclick="SID=null;render()">← All students</button><p class="mu">Loading records…</p>';
+  const x=stats(s),today=new Date().toISOString().slice(0,10),last=x.rs[0],free=db.curricula.filter(c=>!cids(s).includes(c.id));
   return `<button onclick="SID=null;render()">← All students</button>
-  <div class="card"><div style="display:flex;gap:14px;align-items:center">${av(s,'big')}<div><h2 style="margin:0">${esc(s.name)}</h2><div class="mu">${esc((cur(s.cid)||{}).name)} · ${x.done.size}/${x.L.length} lessons completed</div>
-  <label class="mu" style="cursor:pointer;text-decoration:underline">${s.photo?'Change':'Add'} photo<input type="file" accept="image/*" style="display:none" onchange="setPhoto('${s.id}',this.files[0])"></label></div></div>
+  <div class="card"><div style="display:flex;gap:14px;align-items:center">${av(s,'big')}<div><h2 style="margin:0">${esc(s.name)}</h2><div class="mu">${x.n}/${x.L.length} lessons completed</div>
+  <div class="mu"><label style="cursor:pointer;text-decoration:underline">${s.photo?'Change':'Add'} photo<input type="file" accept="image/*" style="display:none" onchange="setPhoto('${s.id}',this.files[0])"></label> · <a href="#" style="color:inherit" onclick="renameStu('${s.id}');return false">Edit name</a></div></div></div>
   <div class="bar" style="margin:8px 0"><i style="width:${x.pct}%"></i></div>
-  <div class="row"><button onclick="dl('${s.id}','doc')">Download Word</button><button onclick="dl('${s.id}','pdf')">Download PDF</button>${me.role==='admin'?`<button onclick="delStu('${s.id}')">Delete student</button>`:''}</div></div>
-  <div class="card next"><b>Train next:</b> ${x.next?esc(x.next.mod)+' → '+esc(x.next.title):'Curriculum complete'}
-  <div class="mu">${last?'Last session '+esc(last.date)+' by '+esc(last.trainer)+': '+esc((x.L.find(l=>l.id===last.lid)||{}).title)+(last.done?'':' (not yet mastered, repeat)'):'No sessions yet'}</div>
+  ${x.byC.map(b=>`<div class="mu">${esc(b.c.name)}: ${b.n}/${b.L.length} lessons (${b.pct}%)</div>`).join('')}
+  <div class="row" style="margin-top:10px"><button onclick="dl('${s.id}','doc')">Download Word</button><button onclick="dl('${s.id}','pdf')">Download PDF</button>${me.role==='admin'?`<button onclick="delStu('${s.id}')">Delete student</button>`:''}</div>
+  ${free.length?`<div class="row"><select id="ac">${free.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><button onclick="addCur('${s.id}')">Add another curriculum</button></div>`:''}</div>
+  <div class="card next"><b>Train next:</b>${x.byC.map(b=>`<div>${esc(b.c.name)}: ${b.next?esc(b.next.mod)+' → '+esc(b.next.title):'complete'}</div>`).join('')||' no curriculum yet'}
+  <div class="mu" style="margin-top:4px">${last?'Last session '+esc(last.date)+' by '+esc(last.trainer)+': '+esc((x.L.find(l=>l.id===last.lid)||{}).title)+(last.done?'':' (not yet mastered, repeat)'):'No sessions yet'}</div>
   ${x.weak.length?`<div style="margin-top:6px"><b>Weak areas:</b> ${x.weak.map(esc).join('; ')}</div>`:''}</div>
   <div class="card"><b>Log a session</b>
   <div class="row"><input type="date" id="rd" value="${today}"><input id="rt" placeholder="Trainer" value="${esc(me.name)}"></div>
-  <div class="row"><select id="rl">${x.L.map(l=>`<option value="${l.id}" ${x.next&&x.next.id===l.id?'selected':''}>${esc(l.mod)} → ${esc(l.title)}${x.done.has(l.id)?' ✓':''}</option>`).join('')}</select>
-  <select id="rr"><option value="5">5 Excellent</option><option value="4">4 Good</option><option value="3" selected>3 Fair</option><option value="2">2 Weak</option><option value="1">1 Needs redo</option></select></div>
+  <div class="row"><select id="rl">${lessonOpts(x,x.next&&x.next.id)}</select><select id="rr">${rateOpts(3)}</select></div>
   <label><input type="checkbox" id="rx" checked style="width:auto"> Lesson completed / mastered</label>
   <div class="row"><input id="rk" placeholder="Skills gained"><input id="rs" placeholder="Struggles"></div>
   <textarea id="ro" style="min-height:60px" placeholder="Notes for the next trainer"></textarea>
   <button class="p" onclick="addRec('${s.id}')">Save session</button></div>
-  <b>History</b>${x.rs.map(r=>`<div class="card"><b>${esc(r.date)}</b> · ${esc((x.L.find(l=>l.id===r.lid)||{}).title)} · ${r.rating}/5 ${r.done?'✓':'(repeat)'}<div class="mu">Trainer: ${esc(r.trainer)}</div>
-  ${r.skills?`<div>Skills: ${esc(r.skills)}</div>`:''}${r.struggles?`<div>Struggles: ${esc(r.struggles)}</div>`:''}${r.notes?`<div>${esc(r.notes)}</div>`:''}</div>`).join('')||'<p class="mu">No sessions logged.</p>'}`;
+  <b>History</b>${x.rs.map(r=>EID===r.id?editForm(s,x,r):`<div class="card"><b>${esc(r.date)}</b> · ${esc((x.L.find(l=>l.id===r.lid)||{}).title)} · ${r.rating}/5 ${r.done?'✓':'(repeat)'}<div class="mu">Trainer: ${esc(r.trainer)}${r.editedBy?' · edited by '+esc(r.editedBy):''}</div>
+  ${r.skills?`<div>Skills: ${esc(r.skills)}</div>`:''}${r.struggles?`<div>Struggles: ${esc(r.struggles)}</div>`:''}${r.notes?`<div>${esc(r.notes)}</div>`:''}
+  <div class="row" style="margin:8px 0 0"><button onclick="EID='${r.id}';render()">Edit</button>${canDel(r)?`<button onclick="delRec('${s.id}','${r.id}')">Delete</button>`:''}</div></div>`).join('')||'<p class="mu">No sessions logged.</p>'}`;
 }
 async function addRec(id){const s=db.students.find(x=>x.id===id),r={studentId:id,date:$('rd').value,trainer:$('rt').value||me.name,lid:$('rl').value,rating:+$('rr').value,done:$('rx').checked,skills:$('rk').value,struggles:$('rs').value,notes:$('ro').value,createdBy:me.id,org:ORG};
-  try{const b=fs.batch();b.set(fs.collection('records').doc(),{...r,createdAt:TS()});
+  try{const b=fs.batch(),ref=fs.collection('records').doc();b.set(ref,{...r,createdAt:TS()});
     if(r.done)b.update(fs.doc('students/'+id),{doneIds:firebase.firestore.FieldValue.arrayUnion(r.lid)});await b.commit();
-    s.records.push(r);if(r.done&&!s.doneIds.includes(r.lid))s.doneIds.push(r.lid);render()}catch(e){alert(e.message)}}
+    s.records.push({...r,id:ref.id});if(r.done&&!s.doneIds.includes(r.lid))s.doneIds.push(r.lid);render()}catch(e){alert(e.message)}}
+async function syncDone(s){const ids=[...new Set(s.records.filter(r=>r.done).map(r=>r.lid))];await fs.doc('students/'+s.id).update({doneIds:ids});s.doneIds=ids}
+async function saveRec(sid,rid){const s=db.students.find(x=>x.id===sid),r=s.records.find(x=>x.id===rid),
+  u={date:$('ed').value||r.date,lid:$('el').value,rating:+$('er').value,done:$('ex').checked,skills:$('ek').value,struggles:$('es').value,notes:$('eo').value,editedBy:me.name};
+  try{await fs.doc('records/'+rid).update({...u,editedAt:TS()});Object.assign(r,u);EID=null;await syncDone(s);render()}catch(e){alert(e.message)}}
+async function delRec(sid,rid){if(!confirm('Delete this session? This cannot be undone.'))return;const s=db.students.find(x=>x.id===sid);
+  try{await fs.doc('records/'+rid).delete();s.records=s.records.filter(r=>r.id!==rid);await syncDone(s);render()}catch(e){alert(e.message)}}
+async function renameStu(id){const s=db.students.find(x=>x.id===id),n=prompt('Correct the student name:',s.name);if(n===null)return;const t=n.trim();if(!t||t===s.name)return;
+  try{await fs.doc('students/'+id).update({name:t});s.name=t;db.students.sort((a,b)=>a.name.localeCompare(b.name));render()}catch(e){alert(e.message)}}
+async function addCur(id){const s=db.students.find(x=>x.id===id),c=$('ac').value;if(!c)return;const l=[...cids(s),c];
+  try{await fs.doc('students/'+id).update({cids:l});s.cids=l;render()}catch(e){alert(e.message)}}
 async function delStu(id){if(!confirm('Delete this student and all records?'))return;
   try{const q=await fs.collection('records').where('studentId','==',id).where('org','==',ORG).get();
     for(let i=0;i<q.docs.length;i+=400){const b=fs.batch();q.docs.slice(i,i+400).forEach(d=>b.delete(d.ref));await b.commit()}
@@ -127,7 +153,7 @@ function curricula(){
     <textarea id="ctx" style="min-height:260px" placeholder="# Module 1: Basics&#10;Lesson one&#10;Lesson two&#10;&#10;# Module 2: Next topic&#10;Lesson three">${esc(txt)}</textarea>
     <div class="row"><button class="p" onclick="saveCur()">Save curriculum</button>${cur(CID)&&me.role==='admin'?`<button onclick="delCur()">Delete</button>`:''}</div></div>`}
   return `<div class="card"><button class="p" onclick="CID='';render()">+ New curriculum</button></div>`+
-  db.curricula.map(c=>`<div class="card st" onclick="CID='${c.id}';render()"><div><b>${esc(c.name)}</b><div class="mu">${c.modules.length} modules · ${lessons(c).length} lessons · ${db.students.filter(s=>s.cid===c.id).length} students</div></div><span>Edit</span></div>`).join('');
+  db.curricula.map(c=>`<div class="card st" onclick="CID='${c.id}';render()"><div><b>${esc(c.name)}</b><div class="mu">${c.modules.length} modules · ${lessons(c).length} lessons · ${db.students.filter(s=>cids(s).includes(c.id)).length} students</div></div><span>Edit</span></div>`).join('');
 }
 async function saveCur(){
   const old=cur(CID),oldL=old?lessons(old):[],mods=[];let m=null;
@@ -138,15 +164,15 @@ async function saveCur(){
   try{if(old){await fs.doc('curricula/'+old.id).update({name,modules:mods});old.name=name;old.modules=mods}
     else{const r=await fs.collection('curricula').add({name,modules:mods,org:ORG,createdAt:TS()});db.curricula.push({id:r.id,name,modules:mods})}
     CID=null;render()}catch(e){alert(e.message)}}
-async function delCur(){if(db.students.some(s=>s.cid===CID))return alert('Students are using this curriculum. Delete or move them first.');
+async function delCur(){if(db.students.some(s=>cids(s).includes(CID)))return alert('Students are using this curriculum. Delete or move them first.');
   if(!confirm('Delete curriculum?'))return;try{await fs.doc('curricula/'+CID).delete();db.curricula=db.curricula.filter(c=>c.id!==CID);CID=null;render()}catch(e){alert(e.message)}}
 /* ---------- reports ---------- */
 function report(s){const x=stats(s);
   return `<div style="font-family:Calibri,Arial,sans-serif"><h1 style="color:${BRAND.c1};border-bottom:3px solid ${BRAND.c2}">${esc(BRAND.name)}: Student Progress Report</h1>
-  ${s.photo?`<img src="${s.photo}" width="110" height="110" style="float:right;border-radius:8px">`:''}<p><b>Student:</b> ${esc(s.name)}<br><b>Curriculum:</b> ${esc((cur(s.cid)||{}).name)}<br><b>Date:</b> ${new Date().toISOString().slice(0,10)}<br><b>Progress:</b> ${x.done.size}/${x.L.length} lessons (${x.pct}%)</p>
-  <p><b>Next lesson:</b> ${x.next?esc(x.next.mod+' → '+x.next.title):'Curriculum complete'}</p>
+  ${s.photo?`<img src="${s.photo}" width="110" height="110" style="float:right;border-radius:8px">`:''}<p><b>Student:</b> ${esc(s.name)}<br><b>Curriculum:</b> ${esc(x.byC.map(b=>b.c.name).join(', '))}<br><b>Date:</b> ${new Date().toISOString().slice(0,10)}<br><b>Progress:</b> ${x.n}/${x.L.length} lessons (${x.pct}%)</p>
+  ${x.byC.map(b=>`<p><b>${esc(b.c.name)}:</b> ${b.n}/${b.L.length} lessons (${b.pct}%). <b>Next lesson:</b> ${b.next?esc(b.next.mod+' → '+b.next.title):'complete'}</p>`).join('')}
   ${x.weak.length?`<p><b>Weak areas:</b> ${x.weak.map(esc).join('; ')}</p>`:''}
-  <h2 style="color:${BRAND.c1}">Curriculum checklist</h2>${(cur(s.cid)||{modules:[]}).modules.map(m=>`<h3>${esc(m.title)}</h3><ul>${m.lessons.map(l=>`<li>${x.done.has(l.id)?'[Done]':'[ ]'} ${esc(l.title)}</li>`).join('')}</ul>`).join('')}
+  <h2 style="color:${BRAND.c1}">Curriculum checklist</h2>${x.byC.map(b=>`<h3>${esc(b.c.name)}</h3>`+b.c.modules.map(m=>`<h4>${esc(m.title)}</h4><ul>${m.lessons.map(l=>`<li>${x.done.has(l.id)?'[Done]':'[ ]'} ${esc(l.title)}</li>`).join('')}</ul>`).join('')).join('')}
   <h2 style="color:${BRAND.c1}">Session history</h2><table border="1" cellspacing="0" cellpadding="5" style="border-collapse:collapse;width:100%;font-size:11pt"><tr style="background:${BRAND.c1};color:#fff"><th>Date</th><th>Trainer</th><th>Lesson</th><th>Rating</th><th>Skills / struggles / notes</th></tr>
   ${[...x.rs].reverse().map(r=>`<tr><td>${esc(r.date)}</td><td>${esc(r.trainer)}</td><td>${esc((x.L.find(l=>l.id===r.lid)||{}).title)}${r.done?'':' (repeat)'}</td><td>${r.rating}/5</td><td>${esc([r.skills&&'Skills: '+r.skills,r.struggles&&'Struggles: '+r.struggles,r.notes].filter(Boolean).join(' | '))}</td></tr>`).join('')}</table></div>`}
 function dl(id,type){const s=db.students.find(x=>x.id===id),h=report(s);
